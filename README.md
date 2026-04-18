@@ -38,8 +38,6 @@ A hybrid graph where both conversations and entities are first-class nodes:
 - **Nodes:** `conversation`, `file`, `function`, `decision`, `bug`, `concept`, `person`, `other`
 - **Edges:** `touched`, `decided`, `caused`, `fixed`, `references`, `depends_on`, `related_to`
 
-See [`docs/design.md`](docs/design.md) for the full schema and tool specifications.
-
 ## Installation
 
 ```bash
@@ -76,8 +74,6 @@ mnemosyne/
 │   ├── graph/            # node/edge CRUD and queries
 │   ├── mcpserver/        # MCP tool handlers
 │   └── viewer/           # local HTTP server + embedded UI
-├── docs/
-│   └── design.md         # full design spec
 └── tests/
 ```
 
@@ -98,4 +94,4 @@ mnemosyne/
 
 ## Status
 
-Early development. See [`docs/design.md`](docs/design.md) for the current design.
+Early development.
