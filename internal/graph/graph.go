@@ -2,6 +2,7 @@ package graph
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -196,4 +197,186 @@ func (s *Store) DeleteNode(id string) error {
 		return fmt.Errorf("delete node %s: %w", id, sql.ErrNoRows)
 	}
 	return nil
+}
+
+// FindOrCreateNode returns the existing node matching (kind, name), or creates
+// a new one if none exists. This is an idempotent upsert — calling it twice
+// with the same arguments always returns the same node ID.
+func (s *Store) FindOrCreateNode(kind, name, body, metadata string) (*Node, bool, error) {
+	existing, err := s.FindNodeByKindAndName(kind, name)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("find or create node: %w", err)
+	}
+
+	created, err := s.CreateNode(kind, name, body, metadata)
+	if err != nil {
+		return nil, false, fmt.Errorf("find or create node: %w", err)
+	}
+	return created, true, nil
+}
+
+// Neighbor holds a node reachable from a starting point along with the edge
+// that connects them.
+type Neighbor struct {
+	Node Node
+	Edge Edge
+}
+
+// Neighbors returns all nodes directly connected to nodeID (both outgoing and
+// incoming edges) up to the given depth. depth=1 returns immediate neighbors
+// only. depth=2 also returns their neighbors, and so on.
+func (s *Store) Neighbors(nodeID string, depth int) ([]Node, []Edge, error) {
+	if depth < 1 {
+		depth = 1
+	}
+
+	visitedNodes := map[string]Node{}
+	visitedEdges := map[string]Edge{}
+	frontier := []string{nodeID}
+
+	for d := 0; d < depth; d++ {
+		var next []string
+		for _, id := range frontier {
+			outEdges, err := s.GetEdgesBySrc(id)
+			if err != nil {
+				return nil, nil, fmt.Errorf("neighbors (src %s): %w", id, err)
+			}
+			inEdges, err := s.GetEdgesByDst(id)
+			if err != nil {
+				return nil, nil, fmt.Errorf("neighbors (dst %s): %w", id, err)
+			}
+
+			for _, e := range append(outEdges, inEdges...) {
+				if _, seen := visitedEdges[e.ID]; seen {
+					continue
+				}
+				visitedEdges[e.ID] = e
+
+				neighborID := e.Dst
+				if neighborID == id {
+					neighborID = e.Src
+				}
+				if _, seen := visitedNodes[neighborID]; !seen {
+					n, err := s.GetNode(neighborID)
+					if err != nil {
+						return nil, nil, fmt.Errorf("neighbors get node %s: %w", neighborID, err)
+					}
+					visitedNodes[neighborID] = *n
+					next = append(next, neighborID)
+				}
+			}
+		}
+		frontier = next
+	}
+
+	nodes := make([]Node, 0, len(visitedNodes))
+	for _, n := range visitedNodes {
+		nodes = append(nodes, n)
+	}
+	edges := make([]Edge, 0, len(visitedEdges))
+	for _, e := range visitedEdges {
+		edges = append(edges, e)
+	}
+	return nodes, edges, nil
+}
+
+// Search finds nodes whose name or body contains the query string (case-insensitive).
+// Optionally filter by kind (pass "" to search all kinds). Results are capped at limit.
+func (s *Store) Search(query, kind string, limit int) ([]Node, error) {
+	pattern := "%" + query + "%"
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if kind != "" {
+		rows, err = s.db.Query(
+			`SELECT id, kind, name, body, metadata, created_at, updated_at
+			 FROM nodes
+			 WHERE kind = ? AND (name LIKE ? OR body LIKE ?)
+			 LIMIT ?`,
+			kind, pattern, pattern, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT id, kind, name, body, metadata, created_at, updated_at
+			 FROM nodes
+			 WHERE name LIKE ? OR body LIKE ?
+			 LIMIT ?`,
+			pattern, pattern, limit,
+		)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("search nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var nodes []Node
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Name, &n.Body, &n.Metadata, &n.CreatedAt, &n.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan search result: %w", err)
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, rows.Err()
+}
+
+// SaveTranscript stores the full text of a conversation. If a transcript for
+// this conversation already exists it is replaced.
+func (s *Store) SaveTranscript(conversationID, content string) error {
+	now := time.Now().Unix()
+	_, err := s.db.Exec(
+		`INSERT INTO transcripts (conversation_id, content, created_at)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(conversation_id) DO UPDATE SET content = excluded.content`,
+		conversationID, content, now,
+	)
+	if err != nil {
+		return fmt.Errorf("save transcript %s: %w", conversationID, err)
+	}
+	return nil
+}
+
+// GetTranscript retrieves the stored transcript for a conversation node.
+// Returns sql.ErrNoRows if none has been saved yet.
+func (s *Store) GetTranscript(conversationID string) (string, error) {
+	var content string
+	err := s.db.QueryRow(
+		`SELECT content FROM transcripts WHERE conversation_id = ?`, conversationID,
+	).Scan(&content)
+	if err != nil {
+		return "", fmt.Errorf("get transcript %s: %w", conversationID, err)
+	}
+	return content, nil
+}
+
+// SetProjectMeta stores a key-value pair in the project metadata table.
+// Calling it again with the same key overwrites the previous value.
+func (s *Store) SetProjectMeta(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO project (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value,
+	)
+	if err != nil {
+		return fmt.Errorf("set project meta %q: %w", key, err)
+	}
+	return nil
+}
+
+// GetProjectMeta retrieves a value from the project metadata table.
+// Returns sql.ErrNoRows if the key doesn't exist.
+func (s *Store) GetProjectMeta(key string) (string, error) {
+	var value string
+	err := s.db.QueryRow(
+		`SELECT value FROM project WHERE key = ?`, key,
+	).Scan(&value)
+	if err != nil {
+		return "", fmt.Errorf("get project meta %q: %w", key, err)
+	}
+	return value, nil
 }
