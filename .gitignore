@@ -1,25 +1,13 @@
-# Binaries
+# Binary
 /mnemosyne
-/bin/
+
+# Project memory databases
+.mnemosyne/
+
+# Docs
+docs/
+
+# Go
 *.exe
 *.test
 *.out
-
-# Go
-vendor/
-
-# IDE
-.idea/
-.vscode/
-
-# OS
-.DS_Store
-
-# Local Mnemosyne data
-.mnemosyne/
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
-
-docs/design.md
