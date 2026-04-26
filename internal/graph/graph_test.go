@@ -220,3 +220,167 @@ func TestSetupCreatesDB(t *testing.T) {
 		t.Fatalf("DB file should exist: %v", err)
 	}
 }
+
+func TestFindOrCreateNode(t *testing.T) {
+	s := setupTestStore(t)
+
+	// First call creates the node.
+	n1, created, err := s.FindOrCreateNode("concept", "WAL", "write-ahead log", "")
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if !created {
+		t.Fatal("expected created=true on first call")
+	}
+
+	// Second call with same (kind, name) returns the same node without creating.
+	n2, created, err := s.FindOrCreateNode("concept", "WAL", "ignored body", "")
+	if err != nil {
+		t.Fatalf("second call: %v", err)
+	}
+	if created {
+		t.Fatal("expected created=false on second call")
+	}
+	if n1.ID != n2.ID {
+		t.Fatalf("expected same id, got %s and %s", n1.ID, n2.ID)
+	}
+}
+
+func TestNeighbors(t *testing.T) {
+	s := setupTestStore(t)
+
+	// Build: a --references--> b --depends_on--> c
+	a, _ := s.CreateNode("file", "a.go", "", "")
+	b, _ := s.CreateNode("file", "b.go", "", "")
+	c, _ := s.CreateNode("file", "c.go", "", "")
+	s.CreateEdge(a.ID, b.ID, "references", "")
+	s.CreateEdge(b.ID, c.ID, "depends_on", "")
+
+	// Depth 1 from b: should find a and c (one hop in each direction).
+	nodes, edges, err := s.Neighbors(b.ID, 1)
+	if err != nil {
+		t.Fatalf("neighbors: %v", err)
+	}
+	if len(edges) != 2 {
+		t.Fatalf("expected 2 edges, got %d", len(edges))
+	}
+	ids := map[string]bool{}
+	for _, n := range nodes {
+		ids[n.ID] = true
+	}
+	if !ids[a.ID] || !ids[c.ID] {
+		t.Fatalf("expected a and c as neighbors, got: %+v", nodes)
+	}
+
+	// Depth 2 from a: should reach b and c.
+	nodes2, _, err := s.Neighbors(a.ID, 2)
+	if err != nil {
+		t.Fatalf("neighbors depth 2: %v", err)
+	}
+	ids2 := map[string]bool{}
+	for _, n := range nodes2 {
+		ids2[n.ID] = true
+	}
+	if !ids2[b.ID] || !ids2[c.ID] {
+		t.Fatalf("expected b and c at depth 2 from a, got: %+v", nodes2)
+	}
+}
+
+func TestSearch(t *testing.T) {
+	s := setupTestStore(t)
+
+	s.CreateNode("decision", "use-wal", "chosen for concurrent access", "")
+	s.CreateNode("decision", "use-uuid", "unique id generation", "")
+	s.CreateNode("file", "db.go", "database layer", "")
+
+	// Search by body text.
+	results, err := s.Search("concurrent", "", 10)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 || results[0].Name != "use-wal" {
+		t.Fatalf("expected use-wal, got: %+v", results)
+	}
+
+	// Search filtered by kind.
+	results, err = s.Search("use", "decision", 10)
+	if err != nil {
+		t.Fatalf("search by kind: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 decisions, got %d", len(results))
+	}
+
+	// Limit is respected.
+	results, err = s.Search("use", "", 1)
+	if err != nil {
+		t.Fatalf("search limit: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result with limit=1, got %d", len(results))
+	}
+}
+
+func TestSaveAndGetTranscript(t *testing.T) {
+	s := setupTestStore(t)
+
+	conv, _ := s.CreateNode("conversation", "session-1", "", "")
+
+	if err := s.SaveTranscript(conv.ID, "hello world"); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := s.GetTranscript(conv.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got != "hello world" {
+		t.Fatalf("unexpected content: %s", got)
+	}
+
+	// Overwrite.
+	s.SaveTranscript(conv.ID, "updated content")
+	got, _ = s.GetTranscript(conv.ID)
+	if got != "updated content" {
+		t.Fatalf("expected overwrite, got: %s", got)
+	}
+}
+
+func TestGetTranscriptNotFound(t *testing.T) {
+	s := setupTestStore(t)
+	_, err := s.GetTranscript("nonexistent")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected ErrNoRows, got: %v", err)
+	}
+}
+
+func TestSetAndGetProjectMeta(t *testing.T) {
+	s := setupTestStore(t)
+
+	if err := s.SetProjectMeta("project_name", "mnemosyne"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	val, err := s.GetProjectMeta("project_name")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if val != "mnemosyne" {
+		t.Fatalf("unexpected value: %s", val)
+	}
+
+	// Overwrite.
+	s.SetProjectMeta("project_name", "renamed")
+	val, _ = s.GetProjectMeta("project_name")
+	if val != "renamed" {
+		t.Fatalf("expected overwrite, got: %s", val)
+	}
+}
+
+func TestGetProjectMetaNotFound(t *testing.T) {
+	s := setupTestStore(t)
+	_, err := s.GetProjectMeta("nonexistent_key")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected ErrNoRows, got: %v", err)
+	}
+}
